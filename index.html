@@ -7,6 +7,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/localforage/1.10.0/localforage.min.js"></script>
     <style>
         :root {
             --primary-color: #7d5a50;
@@ -242,13 +243,11 @@
     </select>
     <textarea id="topicInput" placeholder="在此处粘贴包含 JSON 数据的文本(如果是生成模式请输入关键词)"></textarea>
     
-    <div style="margin: 10px 0; border-top: 1px dashed rgba(255,255,255,0.2); padding-top: 15px;">
-        <label style="color: #ccc; font-size: 13px; display: block; margin-bottom: 8px;">📂 导入本地 JSONL 数据：</label>
-        <input type="file" id="jsonlInput" accept=".jsonl" onchange="handleFileUpload(event)" style="padding: 6px; background: rgba(0,0,0,0.1); border: 1px solid rgba(255,255,255,0.2); border-radius: 6px; color: white; width: 100%; box-sizing: border-box;">
-    </div>
+    <div id="syncStatus" style="margin: 10px 0; padding: 12px; background: rgba(255, 235, 59, 0.1); border: 1px solid rgba(255, 235, 59, 0.3); border-radius: 8px; color: #ffeb3b; font-size: 13px; display: none; text-align: center; line-height: 1.5;"></div>
     
     <div class="btn-group">
         <button id="generateBtn" onclick="startBatchGeneration()">生成精美卡片</button>
+        <button onclick="forceSync()" style="background: #607d8b;">🔄 强制同步云端</button>
         <button id="abortBtn" onclick="abortGeneration()" style="background: #dc3545; display: none;">强制停止生成</button>
         <button id="downloadBtn" onclick="downloadAllImages()">打包下载所有图片</button>
         <button id="downloadDataBtn" onclick="downloadAllData()">下载轻量数据(JSONL)</button>
@@ -280,6 +279,7 @@ function toggleFullScreen() {
 
 let generatedImagesData = [];
 let rawResultsData = [];
+window.onload = initApp;
 let generatedDOMs = [];
 let currentGalleryIndex = 0;
 let allImportedData = [];
@@ -522,47 +522,64 @@ function drawDynamicTree(cardDOM, data) {
     });
 }
 
-async function handleFileUpload(event) {
-    const file = event.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-        const text = e.target.result;
-        const lines = text.split('\n').filter(line => line.trim());
-        allImportedData = [];
-        const categories = new Set();
+async function initApp() {
+    const syncStatus = document.getElementById('syncStatus');
+    try {
+        allImportedData = await localforage.getItem('word_cards_db');
         
-        lines.forEach(line => {
-            try {
-                const parsed = JSON.parse(line);
-                const mapped = {
-                    c: parsed.c || '未分类',
-                    theme: parsed.t,
-                    pos: parsed.pos || '',
-                    ui: parsed.ui || 'modern',
-                    words: parsed.w.map(word => ({
-                        word: word.n,
-                        phonetic: word.p,
-                        definition: word.d
-                    })),
-                    paragraph_en: parsed.en,
-                    paragraph_zh: parsed.zh
-                };
-                allImportedData.push(mapped);
-                categories.add(mapped.c);
-            } catch (err) {
-                console.error('JSON 解析失败，行内容:', line, err);
+        if (!allImportedData || allImportedData.length === 0) {
+            syncStatus.style.display = 'block';
+            syncStatus.innerHTML = '✨ 首次访问：正在从 GitHub 同步 20,000 条核心数据...<br><span style="font-size:11px; opacity:0.8;">(约 27MB，仅首次加载需要消耗流量)</span>';
+            
+            const files = ['./data/part1.jsonl', './data/part2.jsonl'];
+            let combinedData = [];
+            
+            for (const file of files) {
+                const response = await fetch(file);
+                const text = await response.text();
+                const lines = text.split('\n').filter(line => line.trim());
+                
+                lines.forEach(line => {
+                    try {
+                        const parsed = JSON.parse(line);
+                        combinedData.push({
+                            c: parsed.c || '未分类',
+                            theme: parsed.t,
+                            pos: parsed.pos || '',
+                            ui: parsed.ui || 'modern',
+                            words: parsed.w.map(word => ({
+                                word: word.n, phonetic: word.p, definition: word.d
+                            })),
+                            paragraph_en: parsed.en,
+                            paragraph_zh: parsed.zh
+                        });
+                    } catch (err) {}
+                });
             }
-        });
-        
-        const categoryList = Array.from(categories);
-        renderCategoryTabs(categoryList);
-        // 默认加载第一个分类的数据，不再显示“全部”
-        if (categoryList.length > 0) {
-            await renderCategory(categoryList[0]);
+            
+            allImportedData = combinedData;
+            await localforage.setItem('word_cards_db', allImportedData);
+            syncStatus.innerText = '✅ 同步完成！数据已持久化到本地离线空间。';
+            setTimeout(() => syncStatus.style.display = 'none', 3000);
         }
-    };
-    reader.readAsText(file);
+
+        const categories = new Set(allImportedData.map(d => d.c));
+        const categoryList = Array.from(categories).sort();
+        renderCategoryTabs(categoryList);
+        if (categoryList.length > 0) await renderCategory(categoryList[0]);
+
+    } catch (error) {
+        console.error('Initialization error:', error);
+        syncStatus.style.display = 'block';
+        syncStatus.innerText = '❌ 数据同步失败，请检查网络或路径配置。';
+    }
+}
+
+async function forceSync() {
+    if(confirm("确定要强制重新同步云端数据吗？\n这将清空本地数据库并刷新页面。")) {
+        await localforage.removeItem('word_cards_db');
+        location.reload();
+    }
 }
 
 function renderCategoryTabs(categories) {
